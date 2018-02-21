@@ -1,13 +1,13 @@
 #!/bin/bash
 
 ############################################################################
-####																	####
-####	C.H. Beck 														####
-####	Philip Braun (braun.philip@becksche.de)							####
-####																	####
-####	Januar 2018		-		Creation and Deployment					####
-####	Januar 2018		-		Add option for swappiness & bugfixes	####
-####																	####
+####									####
+####	Braun-IT 							####
+####	Philip Braun (philip@braun-bissingen.de)			####
+####									####
+####	Januar 2018	-	Creation and Deployment			####
+####	Januar 2018	-	Add option for swappiness & bugfixes	####
+####									####
 ############################################################################
 
 
