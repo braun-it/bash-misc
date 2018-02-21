@@ -1,0 +1,237 @@
+#!/bin/bash
+
+############################################################################
+####																	####
+####	C.H. Beck 														####
+####	Philip Braun (braun.philip@becksche.de)							####
+####																	####
+####	Januar 2018		-		Creation and Deployment					####
+####	Januar 2018		-		Add option for swappiness & bugfixes	####
+####																	####
+############################################################################
+
+
+#Speicherort des SWAP-File
+swapnew=/opt/swapfile
+#Größe des SWAP-Files in GB
+size=16
+#Alter SWAP
+swapold="$(swapon -s | awk '/dev/ {print $1}')"
+#Wert Swappiness
+swappiness=1
+
+#Farbige Ausgabe der Bash konfigurieren
+NORMAL='\033[0;39m'
+GREEN='\033[1;32m'
+RED='\033[1;31m'
+YELLOW='\033[1;33m'
+BLUE='\033[1;34m'
+
+check-root() {
+	if [ "$(id -u)" != "0" ]; then
+		echo -e "$RED [FEHLER:] Diese Datei muss als ROOT-Benutzer ausgeführt werden! $NORMAL" 1>&2
+		exit 1
+	fi
+}
+
+create() {
+	if [ -f $swapnew ]; 
+	then
+		echo -e "$GREEN [INFO:] SWAP-Datei existiert bereits. Überspringen..."
+	else
+		#Datei erstellen mit definierter Größe. 
+		#Vorsicht! Angegebene Größe wird sofort komplett reserviert.
+		fallocate -l $size"GB" $swapnew > /dev/zero 2>&1
+		if [ $? == 1 ];
+		then	
+			swapsize=expr $size \* 1048576
+			echo -e "$RED [FEHLER:] fallocate Befehl fehlgeschlagen!$NORMAL"
+			echo -e "$GREEN [INFO:] Starte 'dd' Befehl stattdessen. Bitte warten, das kann ein bisschen dauern... $NORMAL"
+			dd if=/dev/zero of=$swapnew bs=1024 count=$swapsize
+			echo -e "$GREEN [INFO:] 'dd' Befehl erfolgreich ausgeführt $NORMAL"
+		fi
+		#Rechte vergeben für das File. Nur Root darf mit der Datei arbeiten
+		chown root:root $swapnew
+		chmod 600 $swapnew
+		#Datei als SWAP-File deklarieren und UUID speichern
+		mkswap $swapnew
+	fi
+}
+
+switch() {
+	partprobe -d -s $swapold > /dev/zero 2>&1
+	if [ $? == 0 ];
+	then
+		for i in $swapold
+		do
+			swapoff $i
+		done
+		swapon $swapnew > /dev/zero 2>&1
+		
+		if [ $? == 255 ]; then
+			echo -e "$YELLOW [WARNUNG:] $swapnew ist bereits als SWAP konfiguriert, oder konnte nicht konfiguriert werden!"
+			echo -e "$YELLOW [WARNUNG:] Bitte kontrollieren Sie die Konfiguration mit 'swapon -s' $NORMAL"
+		fi
+
+		swapdir="$(swapon -s | awk '/file/ {print $1}')"
+		
+		if [[ $swapdir == *"swapfile"* ]];
+		then
+			echo -e "$GREEN [INFO:] SWAP ist nun hier zu finden: $swapdir $NORMAL"
+		else
+			echo -e "$RED [FEHLER:] SWAP nicht gefunden. Bitte überprüfen Sie Ihre Konfiguration! $NORMAL"
+			exit 0
+		fi
+	
+	else
+		echo -e "$RED [FEHLER:] Partition $swapold nicht gefunden. Bitte kontrollieren Sie Ihre momentane Konfiguration! $NORMAL"
+		exit 0
+	fi
+}
+
+swappiness() {
+	#Konfiguration der Swappiness temporär ändern
+	sysctl vm.swappiness=$swappiness > /dev/zero 2>&1
+	
+	#Dauerhafte Anpassung der Swappiness
+	swappiness_old="$(cat /proc/sys/vm/swappiness)"
+	
+	if [ $swappiness_old == $swappiness ];
+	then
+		echo -e "$GREEN [INFO:] Swappiness bereits richtig eingestellt. Fertig... $NORMAL"
+	else 
+		echo "$swappiness" > /proc/sys/vm/swappiness
+	fi
+
+	#Swappiness persistent in der Sysctl Config eintragen
+	sysctlswappiness="$(cat /etc/sysctl.conf | grep -i vm.swappiness)"
+	linesysctlswap="$(awk ' /vm.swappiness/ {print NR":"$1}' /etc/sysctl.conf | egrep -o '^[^:]+')"
+        
+	if [ "$sysctlswappiness" = "vm.swappiness = 1" ]; then
+     		echo -e "$GREEN [INFO:] Swappiness bereits persistent eingetragen. Fertig... $NORMAL"
+        else
+		sed -i ''$linesysctlswap'd' /etc/sysctl.conf
+		echo "vm.swappiness = $swappiness" >> /etc/sysctl.conf
+        fi
+
+}
+
+#fstab Datei bearbeiten. Dabei wird die Zeile mit der alten UUID gelöscht und an diese Stelle stattdessen
+#die neue UUID des SWAP-Files gesetzt.  
+
+
+persistent() {
+	if [ -f /etc/fstab.new ];
+	then
+		rm -f /etc/fstab.new
+		echo -e "$YELLOW [WARNUNG:] "/etc/fstab.new" existiert bereits. lösche Datei $NORMAL"
+	fi
+	
+	#Zeile mit alter UUID wird ausgegeben
+	uuidlineold="$(awk '/swap/ && /sw/ && /0/ {print NR":"$1}' /etc/fstab | egrep -o '^[^:]+')"
+		
+	if [[ $swapdir == *"swapfile"* ]];
+	then
+		#Sicherungskopie von fstab-Datei erstellen
+		cp /etc/fstab /etc/fstab.old		
+	
+		#Zeile und Kommentar werden gelöscht und restlicher Inhalt wird in fstab.new geschrieben
+		for i in $uuidlineold;
+		do
+			sed -i ''$i'd' /etc/fstab
+			uuidlineold="$(awk '/swap/ && /sw/ && /0/ {print NR":"$1}' /etc/fstab | egrep -o '^[^:]+')"
+		done
+		
+		echo -e "#SWAP geändert auf $swapnew" >> /etc/fstab
+		echo -e "$swapnew none \t \t swap \t sw \t \t 0 \t 0" >> /etc/fstab
+		
+		#Aufräumen & scharf schalten
+		rm -f /tmp/UUID_SWAP-File
+	else
+		echo -e "$RED [FEHLER:] SWAP-Datei wurde nicht gefunden. Bitte überprüfen Sie Ihre Konfiguration $NORMAL"
+		exit 0
+	fi
+	
+	#Hinweis auf alte Partition, die formatiert werden muss
+	echo -e "$BLUE [To-Do:] Die alte SWAP Partition $swapold wird nun nicht mehr gebraucht $NORMAL"
+	echo -e "$BLUE [To-Do:] Bitte booten Sie in ein Live-System und entfernen Sie diese Partition $NORMAL"
+	echo -e "$BLUE [To-Do:] Der freigegebene speicherplatz kann nun dem System zugeordnet werden $NORMAL"
+}
+
+check() {
+     	swapdir="$(swapon -s | awk '/file/ {print $1}')"
+	if [[ $swapdir == *"swapfile"* ]];
+	then
+		echo -e "$GREEN [INFO:] SWAP wird über eine Datei konfiguriert $NORMAL"
+		echo -e "$GREEN [INFO:] SWAP ist hier zu finden: $swapdir $NORMAL"
+	else
+		echo -e "$GREEN [INFO:] SWAP wird über eine Partition konfiguriert $NORMAL"
+		echo -e "$GREEN [INFO:] SWAP Partition ist: $swapold $NORMAL"
+		exit 0
+	fi
+}
+
+test-fstab() {
+	swapon -a
+
+	if [ $? == 0 ]
+	then
+		echo -e "$GREEN [INFO:] fstab-Datei wurde richtig konfiguriert! $NORMAL"
+	else
+		echo -e "$GREEN [INFO:] fstab-Datei wurde falsch konfiguriert. Nach dem nächsten Neustart wird der SWAP nicht mehr richtig geladen! $NORMAL"
+	fi
+}
+case "$1" in
+
+	switch)
+			check-root
+			create
+			switch
+			swappiness
+			persistent
+			test-fstab
+			;;
+	switch-temp)
+			check-root
+			create
+			switch
+			swappiness
+			;;
+	
+	check)
+                        check-root
+			check	
+			;;
+	
+	test-fstab)
+                        check-root
+			test-fstab
+			;;
+	help)
+			echo -e "\t"
+			echo "change-swap [option]"
+			echo -e "\t"
+			echo "Options:"
+			echo "switch 				=>	SWAP ändern von Partition zu Datei"
+			echo "switch-temp 			=> 	SWAP temporär zu einer Datei ändern"
+			echo "check 				=>	Überprüfen, welcher SWAP gerade benutzt wird"
+			echo "test-fstab 			=>	Teste fstab-Datei auf gültige SWAP Konfiguration"
+			echo "help 				=>	Zeige diese Hilfe an"
+			;;
+	
+	*)
+			echo -e "\t"
+			echo "change-swap [option]"
+			echo -e "\t"
+			echo "Options:"
+			echo "switch 				=>	SWAP ändern von Partition zu Datei"
+			echo "switch-temp 			=> 	SWAP temporär zu einer Datei ändern"
+			echo "check 				=>	Überprüfen, welcher SWAP gerade benutzt wird"
+			echo "test-fstab			=>      Teste fstab-Datei auf gültige SWAP Konfiguration"
+			echo "help 				=>	Zeige diese Hilfe an"
+			;;
+
+
+esac
+exit 0
+
